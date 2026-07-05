@@ -6,7 +6,16 @@ from __future__ import annotations
 import argparse
 import os
 import shutil
+import sys
+from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
+from typing import IO, Iterator
+
+try:
+    from tqdm import tqdm
+except ImportError:  # pragma: no cover - optional dependency
+    tqdm = None
 
 
 CHART_EXTENSIONS = {
@@ -16,6 +25,62 @@ CHART_EXTENSIONS = {
     ".pms",
     ".bmson",
 }
+
+
+class TeeWriter:
+    def __init__(self, *streams: IO[str]) -> None:
+        self.streams = streams
+
+    def write(self, text: str) -> int:
+        for stream in self.streams:
+            stream.write(text)
+        return len(text)
+
+    def flush(self) -> None:
+        for stream in self.streams:
+            stream.flush()
+
+    def isatty(self) -> bool:
+        return any(getattr(stream, "isatty", lambda: False)() for stream in self.streams)
+
+
+@contextmanager
+def tee_output_to_log() -> Iterator[Path]:
+    log_dir = Path(__file__).resolve().parent / "log"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_path = log_dir / f"merge_bms_folders_{timestamp}_{os.getpid()}.log"
+
+    original_stdout = sys.stdout
+    original_stderr = sys.stderr
+
+    with log_path.open("w", encoding="utf-8", buffering=1) as log_file:
+        sys.stdout = TeeWriter(original_stdout, log_file)  # type: ignore[assignment]
+        sys.stderr = TeeWriter(original_stderr, log_file)  # type: ignore[assignment]
+        try:
+            yield log_path
+        finally:
+            sys.stdout = original_stdout
+            sys.stderr = original_stderr
+
+
+@contextmanager
+def progress_bar(total: int | None, desc: str) -> Iterator[object | None]:
+    if tqdm is None:
+        yield None
+        return
+
+    with tqdm(total=total, desc=desc, unit="folder", dynamic_ncols=True) as bar:
+        yield bar
+
+
+def update_progress(bar: object | None, count: int = 1, postfix: str | None = None) -> None:
+    if bar is None:
+        return
+
+    if postfix is not None:
+        bar.set_postfix_str(postfix)  # type: ignore[attr-defined]
+    bar.update(count)  # type: ignore[attr-defined]
 
 
 def is_relative_to(path: Path, base: Path) -> bool:
@@ -44,20 +109,31 @@ def find_song_folders(root: Path, dest_root: Path) -> list[Path]:
     songs配下は探索対象から除外する。
     """
     candidates: list[Path] = []
+    scanned = 0
 
     root = root.resolve()
     dest_root = dest_root.resolve()
 
-    for current, dirs, files in os.walk(root):
-        current_path = Path(current).resolve()
+    with progress_bar(total=None, desc=f"Scanning {root.name}") as bar:
+        for current, dirs, files in os.walk(root):
+            scanned += 1
+            current_path = Path(current).resolve()
 
-        if current_path == dest_root or is_relative_to(current_path, dest_root):
-            dirs[:] = []
-            continue
+            if current_path == dest_root or is_relative_to(current_path, dest_root):
+                dirs[:] = []
+                update_progress(bar, postfix=f"found={len(candidates)}")
+                continue
 
-        # 隠し/一時系を軽く除外したい場合はここで dirs を編集できる
-        if any(Path(f).suffix.lower() in CHART_EXTENSIONS for f in files):
-            candidates.append(current_path)
+            # 隠し/一時系を軽く除外したい場合はここで dirs を編集できる
+            if any(Path(f).suffix.lower() in CHART_EXTENSIONS for f in files):
+                candidates.append(current_path)
+
+            update_progress(bar, postfix=f"found={len(candidates)}")
+
+            if bar is None and scanned % 1000 == 0:
+                print(f"[SCAN PROGRESS] scanned={scanned}, found={len(candidates)}")
+
+    print(f"[SCAN RESULT] scanned={scanned}, candidates={len(candidates)}")
 
     # 親候補の中にさらに曲フォルダ候補がある場合、親を移動すると危険なので親を除外する
     # 例: event_root に .bms が直置きされていて、さらに event_root/songA もある場合など
@@ -222,61 +298,66 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    dest_root = Path(args.dest).resolve()
-    source_roots = [Path(s).resolve() for s in args.source]
-    dry_run = not args.execute
+    with tee_output_to_log() as log_path:
+        dest_root = Path(args.dest).resolve()
+        source_roots = [Path(s).resolve() for s in args.source]
+        dry_run = not args.execute
 
-    print(f"Destination: {dest_root}")
-    print(f"Mode: {'EXECUTE' if not dry_run else 'DRY-RUN'}")
-    print()
-
-    if dry_run:
-        print("This is a dry-run. No files will be changed.")
-        print("Add --execute after checking the output.")
+        print(f"Log: {log_path}")
+        print(f"Destination: {dest_root}")
+        print(f"Mode: {'EXECUTE' if not dry_run else 'DRY-RUN'}")
         print()
 
-    if not dest_root.exists():
-        print(f"[INFO] Destination does not exist yet: {dest_root}")
-        if not dry_run:
-            dest_root.mkdir(parents=True, exist_ok=True)
+        if dry_run:
+            print("This is a dry-run. No files will be changed.")
+            print("Add --execute after checking the output.")
+            print()
 
-    all_candidates: list[tuple[Path, Path]] = []
+        if not dest_root.exists():
+            print(f"[INFO] Destination does not exist yet: {dest_root}")
+            if not dry_run:
+                dest_root.mkdir(parents=True, exist_ok=True)
 
-    for source_root in source_roots:
-        if not source_root.exists():
-            print(f"[WARN] Source does not exist: {source_root}")
-            continue
+        all_candidates: list[tuple[Path, Path]] = []
 
-        if source_root == dest_root or is_relative_to(source_root, dest_root):
-            print(f"[WARN] Source is destination or under destination, skipped: {source_root}")
-            continue
+        for source_root in source_roots:
+            if not source_root.exists():
+                print(f"[WARN] Source does not exist: {source_root}")
+                continue
 
-        print(f"[SCAN] {source_root}")
-        candidates = find_song_folders(source_root, dest_root)
-        print(f"[FOUND] {len(candidates)} song folders")
-        for c in candidates:
-            all_candidates.append((c, source_root))
+            if source_root == dest_root or is_relative_to(source_root, dest_root):
+                print(f"[WARN] Source is destination or under destination, skipped: {source_root}")
+                continue
 
-    # 浅い順に処理
-    all_candidates.sort(key=lambda x: len(x[0].parts))
+            print(f"[SCAN] {source_root}")
+            candidates = find_song_folders(source_root, dest_root)
+            print(f"[FOUND] {len(candidates)} song folders")
+            for c in candidates:
+                all_candidates.append((c, source_root))
 
-    print()
-    print(f"Total song folders: {len(all_candidates)}")
+        # 浅い順に処理
+        all_candidates.sort(key=lambda x: len(x[0].parts))
 
-    for src_song_dir, source_root in all_candidates:
-        if not src_song_dir.exists():
-            print(f"[SKIP] source no longer exists: {src_song_dir}")
-            continue
+        print()
+        print(f"Total song folders: {len(all_candidates)}")
 
-        process_song_folder(
-            src_song_dir=src_song_dir,
-            dest_root=dest_root,
-            source_root=source_root,
-            dry_run=dry_run,
-        )
+        with progress_bar(total=len(all_candidates), desc="Moving") as bar:
+            for src_song_dir, source_root in all_candidates:
+                if not src_song_dir.exists():
+                    print(f"[SKIP] source no longer exists: {src_song_dir}")
+                    update_progress(bar)
+                    continue
 
-    print()
-    print("Done.")
+                process_song_folder(
+                    src_song_dir=src_song_dir,
+                    dest_root=dest_root,
+                    source_root=source_root,
+                    dry_run=dry_run,
+                )
+                update_progress(bar)
+
+        print()
+        print("Done.")
 
 
 if __name__ == "__main__":
