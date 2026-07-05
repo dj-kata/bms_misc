@@ -1,0 +1,39 @@
+[project]
+name = "manage-songs"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "taskipy>=1.14.1",
+]
+
+[tool.taskipy.tasks]
+dryrun = '''
+python merge_bms_folders.py \
+  --source "/mnt/d/bms/jack_bms" \
+  --source "/mnt/d/bms/DPsatellite" \
+  --source "/mnt/d/bms/DP発狂難易度表" \
+  --source "/mnt/d/bms/sagoosoiya" \
+  --source "/mnt/d/bms/starter_pack" \
+  --source "/mnt/d/bms/others" \
+  --source "/mnt/d/bms/satellite難易度表" \
+  --source "/mnt/d/bms/発狂難易度表" \
+  --source "/mnt/d/bms/beatoraja/http_download" \
+  --dest "/mnt/d/bms/songs"
+'''
+
+execute = '''
+python merge_bms_folders.py \
+  --source "/mnt/d/bms/jack_bms" \
+  --source "/mnt/d/bms/DPsatellite" \
+  --source "/mnt/d/bms/DP発狂難易度表" \
+  --source "/mnt/d/bms/sagoosoiya" \
+  --source "/mnt/d/bms/starter_pack" \
+  --source "/mnt/d/bms/others" \
+  --source "/mnt/d/bms/satellite難易度表" \
+  --source "/mnt/d/bms/発狂難易度表" \
+  --source "/mnt/d/bms/beatoraja/http_download" \
+  --dest "/mnt/d/bms/songs" \
+  --execute
+'''
